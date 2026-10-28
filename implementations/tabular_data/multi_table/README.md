@@ -17,6 +17,10 @@ multi_table/
 ```
 
 For a supervised real-to-synthetic transfer baseline on transaction overdrafts, see [`anomaly_detection/overdraft_detection.ipynb`](anomaly_detection/overdraft_detection.ipynb). It defines the label as `trans.balance < 0`, trains only on real transactions, and evaluates on account-held-out real data and generated transactions.
+
+To experiment with leakage-safe past-transaction context features for overdraft synthesis, see [`anomaly_detection/overdraft_feature_engineering.ipynb`](anomaly_detection/overdraft_feature_engineering.ipynb). It builds features using only prior calendar dates and exports a separate ClavaDDPM input directory, leaving existing datasets unchanged.
+
+For repeatable training/synthesis runs without rerunning notebooks, use [`anomaly_detection/run_clavaddpm_experiment.py`](anomaly_detection/run_clavaddpm_experiment.py) with the training and synthesizing YAML configs. Each run requires a fresh output directory to avoid reusing checkpoints.
 #### Suggested Path
 
 **Multi table:** [`data_preprocessing/README.md`](multi_table/data_preprocessing/README.md) (raw files via `download_and_save_multi_table_data`, then `pre_process_berka_all_tabels.py` or the notebook) → [`training/README.md`](multi_table/training/README.md) / `ClavaDDPM_training.ipynb` → [`synthesizing/README.md`](multi_table/synthesizing/README.md) / `ClavaDDPM_synthesizing.ipynb` → `multi_table/evaluation/multi_table_metrics.ipynb` for 1-hop relational metrics. Use [`evaluation/`](evaluation/) for per-table column metrics on a generated table.

@@ -1,0 +1,77 @@
+{
+    "trans_date": {
+        "type": "continuous"
+    },
+    "trans_type": {
+        "type": "discrete"
+    },
+    "operation": {
+        "type": "discrete"
+    },
+    "amount": {
+        "type": "continuous"
+    },
+    "balance": {
+        "type": "continuous"
+    },
+    "k_symbol": {
+        "type": "discrete"
+    },
+    "bank": {
+        "type": "discrete"
+    },
+    "account": {
+        "type": "continuous"
+    },
+    "calendar_weekday_sin": {
+        "type": "continuous"
+    },
+    "calendar_weekday_cos": {
+        "type": "continuous"
+    },
+    "calendar_month_sin": {
+        "type": "continuous"
+    },
+    "calendar_month_cos": {
+        "type": "continuous"
+    },
+    "history_days_since_previous_active_day": {
+        "type": "continuous"
+    },
+    "history_prior_7d_transaction_count": {
+        "type": "continuous"
+    },
+    "history_prior_7d_inflow": {
+        "type": "continuous"
+    },
+    "history_prior_7d_outflow": {
+        "type": "continuous"
+    },
+    "history_prior_7d_net_flow": {
+        "type": "continuous"
+    },
+    "history_prior_30d_transaction_count": {
+        "type": "continuous"
+    },
+    "history_prior_30d_inflow": {
+        "type": "continuous"
+    },
+    "history_prior_30d_outflow": {
+        "type": "continuous"
+    },
+    "history_prior_30d_net_flow": {
+        "type": "continuous"
+    },
+    "history_prior_30d_mean_amount": {
+        "type": "continuous"
+    },
+    "history_prior_30d_overdraft_count": {
+        "type": "continuous"
+    },
+    "history_prior_30d_overdraft_rate": {
+        "type": "continuous"
+    },
+    "amount_to_prior_30d_mean": {
+        "type": "continuous"
+    }
+}
