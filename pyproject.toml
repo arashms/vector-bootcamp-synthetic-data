@@ -90,6 +90,7 @@ tabular-data = [
     "gdown>=6.1.0",
     "midst-toolkit",
     "pandas>=2.3.3",
+    "scikit-learn>=1.9.1",
 ]
 
 [tool.uv]
