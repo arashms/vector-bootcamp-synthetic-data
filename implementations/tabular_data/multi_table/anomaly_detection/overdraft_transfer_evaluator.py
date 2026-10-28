@@ -69,6 +69,8 @@ class OverdraftTransferEvaluator:
     ``amount``, ``balance``, ``k_symbol``, and ``bank``. The target is derived
     from ``balance < 0``; balance and IDs are never used as predictors.
 
+    Optional ``additional_features`` are treated as numeric predictors and
+    must be present in both real and synthetic transaction tables.
     Categorical values must share the same code mapping in real and synthetic
     inputs. Generated categorical floats are rounded to the nearest valid code;
     out-of-domain values become ``__unknown__``. Use ``name`` when evaluating
@@ -79,17 +81,38 @@ class OverdraftTransferEvaluator:
         self,
         real_data: pd.DataFrame | str | Path,
         *,
+        additional_features: list[str] | None = None,
         test_size: float = 0.2,
         random_state: int = 42,
         threshold: float = 0.5,
         random_forest_params: dict[str, Any] | None = None,
         real_data_config: Mapping[str, Any] | None = None,
     ) -> None:
-        """Split and fit real data, retaining its ClavaDDPM input configuration."""
+        """Split and fit real data, retaining its ClavaDDPM input configuration.
+
+        ``additional_features`` adds numeric columns to the baseline predictors.
+        The requested columns must be present in real data and every synthetic
+        dataset evaluated by this instance.
+        """
         if not 0 < test_size < 1:
             raise ValueError(f"test_size must be between 0 and 1; received {test_size}.")
         if not 0 <= threshold <= 1:
             raise ValueError(f"threshold must be between 0 and 1; received {threshold}.")
+
+        self.additional_features = list(additional_features or [])
+        reserved_features = set(FEATURES + ["balance", TARGET, ACCOUNT_COLUMN])
+        if len(self.additional_features) != len(set(self.additional_features)):
+            raise ValueError("additional_features must not contain duplicate column names.")
+        if any(not isinstance(column, str) or not column for column in self.additional_features):
+            raise ValueError("additional_features must contain non-empty column names.")
+        reserved = reserved_features.intersection(self.additional_features)
+        if reserved:
+            raise ValueError(
+                "additional_features cannot include existing predictors, target, balance, or account ID: "
+                f"{sorted(reserved)}",
+            )
+        self.numeric_features = NUMERIC_FEATURES + self.additional_features
+        self.features = self.numeric_features + CATEGORICAL_FEATURES
 
         self.threshold = threshold
         self.random_state = random_state
@@ -118,14 +141,13 @@ class OverdraftTransferEvaluator:
         if random_forest_params:
             params.update(random_forest_params)
         self.model = self._build_model(params)
-        self.model.fit(self.real_train[FEATURES], self.real_train[TARGET])
+        self.model.fit(self.real_train[self.features], self.real_train[TARGET])
         self.real_test_metrics = self._evaluate(
             self.real_test,
-            self.model.predict_proba(self.real_test[FEATURES])[:, 1],
+            self.model.predict_proba(self.real_test[self.features])[:, 1],
         )
 
-    @staticmethod
-    def _build_model(params: dict[str, Any]) -> Pipeline:
+    def _build_model(self, params: dict[str, Any]) -> Pipeline:
         """Build the notebook's imputation, encoding, and forest pipeline."""
         numeric_pipeline = Pipeline(steps=[("imputer", SimpleImputer(strategy="median"))])
         categorical_pipeline = Pipeline(
@@ -136,7 +158,7 @@ class OverdraftTransferEvaluator:
         )
         preprocessor = ColumnTransformer(
             transformers=[
-                ("numeric", numeric_pipeline, NUMERIC_FEATURES),
+                ("numeric", numeric_pipeline, self.numeric_features),
                 ("categorical", categorical_pipeline, CATEGORICAL_FEATURES),
             ],
         )
@@ -155,7 +177,7 @@ class OverdraftTransferEvaluator:
         require_accounts: bool,
     ) -> pd.DataFrame:
         """Validate columns, derive labels, and align generated categorical codes."""
-        required = set(FEATURES + ["balance"])
+        required = set(self.features + ["balance"])
         if require_accounts:
             required.add(ACCOUNT_COLUMN)
         missing = required.difference(data.columns)
@@ -163,7 +185,7 @@ class OverdraftTransferEvaluator:
             raise ValueError(f"{dataset_name} data is missing required columns: {sorted(missing)}")
 
         prepared = data.copy()
-        for column in NUMERIC_FEATURES + ["balance"]:
+        for column in self.numeric_features + ["balance"]:
             prepared[column] = pd.to_numeric(prepared[column], errors="coerce")
         if prepared["balance"].isna().any():
             raise ValueError(f"{dataset_name} balance contains missing or non-numeric values.")
@@ -239,7 +261,7 @@ class OverdraftTransferEvaluator:
             raise ValueError("name must be a non-empty dataset or configuration label.")
         raw_data = _read_frame(synthetic_data, name)
         prepared = self._prepare_data(raw_data, name, require_accounts=False)
-        probabilities = self.model.predict_proba(prepared[FEATURES])[:, 1]
+        probabilities = self.model.predict_proba(prepared[self.features])[:, 1]
         metrics = self._evaluate(prepared, probabilities)
         metrics["clavaddpm_config"] = json.dumps(config or {}, sort_keys=True, default=str)
         metrics["real_data_config"] = self.real_data_config
