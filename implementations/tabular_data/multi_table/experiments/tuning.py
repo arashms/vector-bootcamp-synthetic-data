@@ -22,6 +22,8 @@ import yaml
 
 
 MULTI_TABLE = Path(__file__).resolve().parents[1]
+DEFAULT_EXPERIMENT_ROOT = MULTI_TABLE / "results/experiments/transaction_tuning_from_scratch"
+DEFAULT_REPORT_ROOT = MULTI_TABLE / "results/experiments/transaction_overdraft_from_scratch"
 PRESETS = {
     "guidance": ("sampling_config.classifier_scale", [0.0, 0.5, 1.0, 2.0, 4.0]),
     "cluster_count": ("clustering_config.num_clusters", [10, 25, 50]),
@@ -154,14 +156,20 @@ def validate_config(config, *, fresh_training=True):  # noqa: PLR0912
     return result
 
 
-def make_trials(base, parameter, values, *, sampling_seeds=(42,), training_seeds=None, fresh_training=True):
-    """One parameter at a time. For deliberate combinations, edit a base copy."""
+def make_trials(
+    base, parameter, values, *, sampling_seeds=(42,), training_seeds=None, fresh_training=True, include_baseline=False,
+):
+    """Vary one parameter; optionally include its baseline for every seed pair."""
     section, field = parameter.split(".")
     if section not in base or field not in base[section]:
         raise ValueError(f"Unknown parameter: {parameter}")
+    candidates = []
+    for value in ([base[section][field]] if include_baseline else []) + list(values):
+        if value not in candidates:
+            candidates.append(deepcopy(value))
     trials = []
     for train_seed in training_seeds or (base["training_seed"],):
-        for value in values:
+        for value in candidates:
             for sample_seed in sampling_seeds:
                 config = deepcopy(base)
                 config[section][field] = value
@@ -248,6 +256,36 @@ def _stage(directory, manifest, action):
 def _load(path):
     with path.open("rb") as stream:
         return pickle.load(stream)
+
+
+def completed_runs(data_dir, output_root, *, configs=None):
+    """Discover completed samples for this dataset, optionally exact trial configs.
+
+    Partial stages and other datasets are excluded. A claimed complete run with
+    changed or missing artifacts fails explicitly. Discovery does not sample or
+    train models, and includes compatible results from earlier runner versions.
+    """
+    signature = data_signature(data_dir)
+    paths = []
+    for status_path in sorted((Path(output_root) / "samples").glob("*/status.json")):
+        status = json.loads(status_path.read_text())
+        if status.get("status") != "complete":
+            continue
+        directory = status_path.parent
+        manifest = json.loads((directory / "manifest.json").read_text())
+        if manifest.get("context", {}).get("data") != signature:
+            continue
+        if configs is not None and manifest.get("config") not in configs:
+            continue
+        artifacts = status.get("artifacts", {})
+        expected = {"synthetic_final_with_keys.pkl", "config.yaml"}
+        if not expected.issubset(artifacts) or any(
+            not (directory / name).is_file() or file_hash(directory / name) != checksum
+            for name, checksum in artifacts.items()
+        ):
+            raise ValueError(f"Changed or missing completed-run artifacts: {directory}")
+        paths.append(directory)
+    return paths
 
 
 def _dump(path, value):
