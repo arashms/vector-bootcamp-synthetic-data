@@ -1,138 +1,282 @@
-# Multi-table hyperparameter tuning
+# Multi-table experiments — start from zero
 
-Start with [guidance_strength.ipynb](guidance_strength.ipynb). It reuses the trained ClavaDDPM models to explore guidance strength without retraining.
+**Start with [prepare_account_sample.ipynb](prepare_account_sample.ipynb).** No completed experiments,
+trained generator checkpoints, or saved synthetic data are required. You execute
+the notebooks yourself. This workflow keeps one notebook per hyperparameter and
+one final comparison notebook, with shared implementation underneath.
 
-Hyperparameters are settings we choose to control how the model groups, learns, or generates data. The goal is to improve relationships between tables while keeping individual columns realistic and preserving data diversity.
+## Run order
 
-## Start here: transaction and overdraft tuning
+You execute the notebooks. No data preparation, training, generation, or notebook
+execution is launched automatically by these files.
 
-1. Open [transaction_overdraft_evaluation.ipynb](transaction_overdraft_evaluation.ipynb)
-   to inspect the five **already generated** guidance runs. This uses CPU and takes
-   about 1–3 minutes. No loan classification is used.
-2. Open [hyperparameter_tuning.ipynb](hyperparameter_tuning.ipynb) to preview a new
-   guidance, clustering, diffusion, or classifier sweep. `RUN_NEW_TRIALS = False`
-   keeps GPU work disabled until a budget is chosen.
-3. Read [PROGRESS.md](PROGRESS.md) for actual findings, decisions, and validation
-   limits. Original training/synthesis notebooks, YAML configs, and baseline
-   checkpoints are preserved.
+1. **Prepare the environment.** From the repository terminal run
+   `uv sync --locked --group tabular-data --inexact`, then select the `.venv` kernel.
+   Full raw Berka tables already available in `../data/berka/raw_data` can be reused.
+   If yours live elsewhere, set the raw-data path below; do not sample the earlier
+   20,000-row processed transaction file to recover histories.
+2. **Create the account cohort on CPU.** Open
+   [prepare_account_sample.ipynb](prepare_account_sample.ipynb). Review raw/output
+   paths, **500 accounts and seed 42**, then run the preview. Set
+   `PREPARE_DATASET = True` and rerun to write a separate processed dataset.
+   All 8 tables are retained; every raw transaction for selected accounts is kept.
+3. **Establish the baseline.** Open [00_baseline.ipynb](00_baseline.ipynb), confirm
+   the selected `DATA_DIR`, preview with `RUN_NEW_TRIALS = False`, then set it to
+   `True` yourself on a GPU. It trains/generates one reference and evaluates both
+   full-table quality and overdraft/transaction quality. Record actual runtime
+   and results in [PROGRESS.md](PROGRESS.md).
+4. **Tune one parameter at a time.** Start with
+   [guidance_strength_tuning.ipynb](guidance_strength_tuning.ipynb); it reuses the
+   baseline models. Keep the same input dataset/base settings, narrow `VALUES`,
+   preview, then enable generation when ready. Each parameter value is compared
+   with its included baseline value. Repeat promising settings across seeds later.
+5. **Compare completed experiments on CPU.** Run
+   [all_experiments.ipynb](all_experiments.ipynb). It discovers this dataset's
+   completed runs and evaluates them together with one detector. Inspect both
+   metric groups and the per-table/per-edge CSVs before filling the conclusions.
 
-Use the project `.venv` kernel. Restore the existing declared dependencies with
-`uv sync --locked --group tabular-data --inexact` if needed.
+Use one generating notebook at a time. The first full baseline training duration
+has not been measured. The 500-account raw preview contains 117,560 transactions
+and 247 overdraft rows for the currently available source and seed, considerably
+more transactions than the previous row sample. Full histories, larger models,
+and more candidates increase generation cost. Read actual preview counts rather
+than assuming those numbers for a different raw source.
 
-### Minimal code structure
+## Change the account count or dataset path
 
-| File | Responsibility |
+Edit [dataset_settings.py](dataset_settings.py), then **restart notebook kernels**:
+
+```python
+ACCOUNT_SAMPLE_SIZE = 500  # None means all accounts.
+DATA_SEED = 42
+RAW_DATA_DIR = MULTI_TABLE / "data/berka/raw_data"
+COHORT_LABEL = "all" if ACCOUNT_SAMPLE_SIZE is None else str(ACCOUNT_SAMPLE_SIZE)
+DATA_DIR = MULTI_TABLE / "data" / f"berka_accounts_{COHORT_LABEL}_seed{DATA_SEED}"
+```
+
+The default `COHORT_LABEL` is derived from account count. Changing count/seed in
+that file derives a new processed directory. You can instead set `DATA_DIR` to
+any existing **Berka-compatible processed dataset** (for example,
+`DATA_DIR = Path("/path/to/processed_dataset")`) with the 8 CSVs, domain files,
+`dataset_meta.json`, and `preprocess_meta.json`. For a different schema, adapting
+its table/ID rules and task evaluator is separate work.
+
+The preparation notebook exposes `RAW_DATA_DIR`, `ACCOUNT_SAMPLE_SIZE`,
+`SAMPLING_SEED`, and `OUTPUT_DATA_DIR`; every experiment exposes
+`DATA_DIR = DEFAULT_DATA_DIR`. If overriding values locally, update the shared
+`DATA_DIR` or override it consistently in every notebook you run. Always create
+that dataset's matching baseline before its parameter sweeps.
+
+Different data contents produce distinct cache/report fingerprints even under a
+common experiment root. Discovery filters out other datasets. Evaluation rejects
+trial/reference fingerprint mismatches. Identical contents may reuse verified
+stages. Existing datasets and synthesized files are not deleted or replaced.
+
+## Account sampling and preservation
+
+Select account IDs uniformly with a fixed seed, without using overdraft labels.
+Retain their `trans`, `loan`, `order`, and `disp` rows; cards follow dispositions,
+clients follow dispositions, and districts are the union referenced by accounts
+and clients. A shared client does not pull other accounts into the cohort. This
+preserves complete **observed raw histories for selected accounts**, rather than
+claiming complete histories for every client. All 8 declared relationships must
+resolve.
+
+The helper reuses existing preprocessing functions and writes a separate dataset:
+CSV/domain files, codebooks, date epochs, `selected_accounts.csv`, and an
+`account_sample_manifest.json` recording raw/source/config fingerprints and
+artifact checksums. `preprocess_meta.json` records the sampling unit and counts.
+There is no transaction-row limit in this mode.
+
+Only an identical completed output is reused after verification. Existing unrelated,
+incomplete, differently configured, or modified outputs are rejected; choose a new
+output directory. Empty child tables are rejected; preview small-table and event
+counts before training. Small cohorts can make clustering and evaluation noisy.
+
+## Your first baseline
+
+The baseline copies the original YAML settings and aligns diffusion/classifier
+internal splits to **70/20/10**. They fit preprocessing independently, so using the
+same split avoids training guidance in a different feature coordinate system.
+The original diffusion config used 99/0.5/0.5 while its classifier defaulted to
+70/20/10. This workflow establishes its own fresh reference.
+
+| Setting | Initial value |
 | --- | --- |
-| `transaction_overdraft_evaluation.ipynb` | Saved-run comparison, plots, diagnostics, and conclusion. |
-| `hyperparameter_tuning.ipynb` + `tuning.py` | Choose one experiment, preview reuse, explicitly execute selected trials. |
-| `../evaluation/overdraft_transfer_evaluator.py` | Existing real-trained random forest; no target or ID inputs. |
-| `../evaluation/transaction_quality.py` + `transaction_evaluation.py` | Shared fidelity checks, bootstrap uncertainty, report saving. |
-| `guidance_strength.ipynb` | Historical all-table guidance experiment and its original metrics. |
+| Training / sampling seed | 42 / 42 |
+| Guidance strength | 1.0 |
+| Clustering | 50 groups, parent scale 1.0, K-means + GMM |
+| Training / generation | Original YAML model settings; full sample scale 1.0 |
+| Internal model split | 70% train, 20% validation, 10% test for both models |
 
-### What the current evaluation means
+Keep this baseline fixed while varying one parameter. If you intentionally change
+other base settings, use the same revised baseline in `00_baseline.ipynb` and the
+parameter notebooks. The parameter notebooks require a completed matching baseline
+before enabling a sweep. No previous findings or preferred settings are assumed.
 
-The detector learns from real transactions, then runs unchanged on held-out real
-accounts and each synthetic run. Its target is **current negative balance**;
-this is not future-overdraft forecasting. AP, ROC-AUC, fixed-threshold precision/
-recall, counts, and prevalence are reported. Standardized AP reweights every run
-to the real test event rate, removing only the class-prior difference.
+## Notebook index
 
-The quality checks compare date, amount, balance, and transaction categories;
-repeat comparisons inside the overdraft class; inspect category-specific and
-monthly overdraft rates; and check account volumes, transaction counts including
-zeros, account/transaction relationships, key integrity, and date chronology.
-Numerical and categorical distances exclude identifiers. Constant/undefined
-correlation pairs remain visible rather than being scored as perfect matches.
+### Start, inspect, and compare
 
-There is **no combined score or automatic winner**. Compare rare-event behavior,
-overall fidelity, and account consistency separately. Account-bootstrap intervals
-condition on the fitted detector and saved generation; repeat promising settings
-across generation seeds and eventually training seeds.
-
-### Checkpoint reuse and reproducibility
-
-| Changed setting | Work repeated |
+| Notebook | When to use it |
 | --- | --- |
-| Guidance or sampling seed | Generation only; reuse all models. |
-| Classifier settings | Classifier training and generation; reuse diffusion and clustering. |
-| Diffusion settings | Diffusion, classifier, and generation; reuse clustering. |
+| [prepare_account_sample.ipynb](prepare_account_sample.ipynb) | First: preview and prepare the 500-account cohort. |
+| [00_baseline.ipynb](00_baseline.ipynb) | Then: train, generate, and evaluate the baseline. |
+| [transaction_overdraft_evaluation.ipynb](transaction_overdraft_evaluation.ipynb) | After generation: detailed transaction/overdraft diagnostics for your completed runs. |
+| [all_experiments.ipynb](all_experiments.ipynb) | After parameter runs: compare configurations and their outcomes together. |
+| [hyperparameter_tuning.ipynb](hyperparameter_tuning.ipynb) | Optional generic template for choosing a parameter family. |
+
+### Guidance and clustering
+
+| Notebook | Parameter |
+| --- | --- |
+| [guidance_strength_tuning.ipynb](guidance_strength_tuning.ipynb) | Guidance strength; reuse your new baseline models. |
+| [cluster_count.ipynb](cluster_count.ipynb) | Number of parent/child groups. |
+| [parent_weight.ipynb](parent_weight.ipynb) | Parent-feature influence on grouping. |
+| [clustering_method.ipynb](clustering_method.ipynb) | Grouping algorithm. |
+
+### Diffusion training
+
+| Notebook | Parameter |
+| --- | --- |
+| [diffusion_learning_rate.ipynb](diffusion_learning_rate.ipynb) | Update size. |
+| [diffusion_training_steps.ipynb](diffusion_training_steps.ipynb) | Number of updates. |
+| [diffusion_network_size.ipynb](diffusion_network_size.ipynb) | Hidden layers and widths. |
+| [diffusion_dropout.ipynb](diffusion_dropout.ipynb) | Units randomly disabled during training. |
+| [diffusion_timesteps.ipynb](diffusion_timesteps.ipynb) | Noise levels and generation steps. |
+| [diffusion_batch_size.ipynb](diffusion_batch_size.ipynb) | Rows per update. |
+
+### Generator's guidance classifier
+
+These predict parent groups for generation. The separate overdraft evaluator
+stays fixed across trials.
+
+| Notebook | Parameter |
+| --- | --- |
+| [classifier_learning_rate.ipynb](classifier_learning_rate.ipynb) | Update size. |
+| [classifier_training_steps.ipynb](classifier_training_steps.ipynb) | Number of updates. |
+| [classifier_network_size.ipynb](classifier_network_size.ipynb) | Hidden layers and widths. |
+| [classifier_batch_size.ipynb](classifier_batch_size.ipynb) | Rows per update. |
+| [classifier_time_embedding.ipynb](classifier_time_embedding.ipynb) | Representation of the noise level. |
+
+Every parameter notebook follows **settings → preview → generation → evaluation
+→ conclusion**. It includes baseline and seed controls. Completed stages are
+reused, and repeated candidate values are deduplicated. Conclusions are blank
+until you run the experiment.
+
+The final notebook compares completed runs. A combined setting needs a deliberate
+new configuration, its own generated run, and evaluation; it is not trained
+by the final comparison notebook.
+
+## Evaluation in simple terms
+
+**Every baseline, parameter notebook, and final comparison runs both groups below.**
+No universal weighted score or automatic winner combines them.
+
+### Full multi-table quality
+
+| Check | What it tells you |
+| --- | --- |
+| Column KS / categorical TVD on all 8 tables | Whether each table's distributions resemble the selected real cohort. |
+| Missing/invalid and unknown-category rates | Whether data has unsupported or missing values hidden by other scores. |
+| Primary/foreign keys on all tables/edges | Whether identities are unique/present and relationships resolve. |
+| Children per parent, including zeros | Whether relationship sizes resemble the cohort. |
+| Within-table and parent/child mixed correlations | Whether feature associations are retained; constant/undefined pairs are counted. |
+| Client/account combinations through `disp` | Whether matched parent attributes retain their joint associations. Report mixed-correlation error and joint categorical TVD. |
+
+Marginal summaries average table means equally; the transaction table does not
+outweigh other tables merely by having more rows. Eligible missing column/edge
+scores propagate as missing. Correlation RMSE uses defined pairs and reports
+undefined-pair counts alongside it. Per-table/edge scores remain visible.
+
+IDs never enter numerical fidelity/correlation measurements, including external
+`trans.account` and `order.account_to`. They are used for integrity and joins as
+appropriate. All comparisons use the selected processed cohort, not the full raw
+population. Row-count deviations are diagnostics, not exact equality constraints
+on stochastic generation.
+
+### Transaction and overdraft quality
+
+The supplied random forest learns from real transactions and is tested on
+separate real accounts and each synthetic run. Its target is **current negative
+balance** (`balance < 0`). Balance, target-derived features, and IDs are excluded
+from its predictors. No loan classification is used. Guidance-classifier tuning
+changes generator classifiers, not this fixed task-evaluation model.
+
+Report AP, ROC-AUC, fixed-threshold precision/recall, event counts, and prevalence.
+Standardized AP controls the class-prior difference only. Account-bootstrap
+intervals hold the fitted detector and saved generation fixed; they do not replace
+repeated generation/training seeds.
+
+Transaction diagnostics include overall/overdraft-conditional distributions,
+category/monthly event rates with support, account counts/volumes, integrity, and
+chronology after aligning date epochs. Complete raw account histories now permit
+better source diagnostics; the row-based relational generator still does not
+guarantee faithful sequences. Future rolling/history features need a separate,
+leakage-safe design.
+
+The detector's held-out real accounts are not excluded before generator training.
+The agreed study is **real→synthetic transfer plus fidelity**, not synthetic-trained
+utility on an independent real holdout or privacy protection. No extra outer holdout
+or synthetic→real classifier has been added.
+
+## Shared code and saved artifacts
+
+| Change | Work repeated after the baseline |
+| --- | --- |
+| Guidance or sampling seed | Generation only. |
+| Guidance-classifier settings | Classifier training and generation; reuse diffusion/clustering. |
+| Diffusion settings | Diffusion, classifier training, and generation; reuse clustering. |
 | Clustering or training seed | Clustering and all downstream stages. |
 
-The helper uses toolkit functions for each stage. Fresh stages use separate,
-per-relation random seeds, so cache reuse does not alter subsequent random draws.
-The toolkit still fixes some internal splits/random states; a training-seed change
-is not a different real train/test partition. Cross-hardware determinism is not
-guaranteed.
+`dataset_settings.py` selects shared data paths.
+`../data_preprocessing/account_sampling.py` prepares account cohorts using the
+existing preprocessing transforms.
+`tuning.py` reuses toolkit functions for training/sampling and controls caching.
+`../evaluation/overdraft_transfer_evaluator.py` supplies the detector;
+`transaction_quality.py`, `multi_table_quality.py`, and `transaction_evaluation.py` provide shared diagnostics
+and report saving. Each notebook stays an experimental interface to these helpers.
 
-Fresh training aligns diffusion/classifier internal splits to **70/20/10** because
-the toolkit fits their preprocessing independently. Original diffusion used
-99/0.5/0.5 while its classifier defaulted to 70/20/10. Establish a separate fresh
-baseline before attributing improvements to another setting. Legacy checkpoint
-mode accepts only sampling/matching changes and verifies the current input tables
-against the saved clustering checkpoint.
-
-Artifacts live under `../results/experiments/transaction_tuning/`, with separate
-`clustering/`, `diffusion/`, `models/`, and `samples/` directories. Their IDs include
-input data, relevant settings, seeds, source fingerprints, and dependency versions.
-`manifest.json` records inputs; `status.json` records completion/failure, duration,
-and artifact checksums. Complete matching stages are reused; changed artifacts
-are rejected. Failed stages require a fresh experiment root to retry; there is no
-optimizer-state resume. Use one executing notebook process at a time.
-
-Actual matched tables are captured before toolkit cleanup removes keys. Reports
-live separately under `../results/experiments/transaction_overdraft/<fingerprint>/`
-and contain a comparison CSV, real account split, predictions, per-run detail
-CSVs, metadata, and plots. Pickles are for trusted local experiment artifacts.
-
-### Research limits and next decision
-
-Saved-data evaluation has executed on CPU; full fresh generator training has
-**not** run under the current budget. The real test has only eight overdrafts,
-so its AP estimate has a wide interval. Existing generators saw the full
-reference data; a future synthetic-trained → real-test utility study needs an
-account holdout excluded **before** generator training and clustering.
-
-Sampled transactions are incomplete histories. Rolling/history features,
-sequential balance checks, and graph metrics are deferred until their meaning
-for this sample is established. This framework does not measure privacy.
-
-For the current saved runs, 0–0.5 guidance is promising for overall transaction
-fidelity, but no overdraft winner is established. All five runs have serious
-account-date chronology errors. See the evaluation notebook conclusion.
-
-Run the targeted regression checks from the repository root:
-
-```bash
-.venv/bin/python -m pytest -q implementations/tabular_data/multi_table/tests/test_transaction_workflow.py
-```
-
-## Historical guidance notebook
-
-The earlier notebook sweeps guidance strength and evaluates all eight parent–child
-relationships plus individual column distributions. Its scores and artifacts are
-retained as context; the transaction-focused notebook is now the selection view.
-
-## Run the guidance experiment
-
-1. Open the notebook using the project's `.venv` kernel with GPU access. Existing checkpoints must be present in `../results/models/` and `../results/cluster_ckpt.pkl`.
-2. Adjust the settings cell:
-
-   ```python
-   GUIDANCE_SCALES = [0.0, 0.5, 1.0, 2.0, 4.0]
-   SEEDS = [42]
-   SWEEP_NAME = "guidance_strength_first_pass"
-   ```
-
-3. Run the cells in order. Five guidance values and one seed produce five full-dataset trials. Keep the other settings fixed so the comparison measures guidance strength.
-4. Review the comparison table and inspect individual edge or column scores. Repeat promising values with more seeds, such as `[42, 123, 456]`, before choosing a setting.
-
-Each trial saves under:
+All new notebooks share paths defined in `tuning.py`:
 
 ```text
-../results/experiments/<SWEEP_NAME>/guidance_<value>_seed<seed>/
+../results/experiments/transaction_tuning_from_scratch/
+    clustering/    diffusion/    models/    samples/
+../results/experiments/transaction_overdraft_from_scratch/<report-fingerprint>/
 ```
 
-Completed trials are reused when their saved settings and checkpoint signatures match. If a trial was interrupted, or you change the scoring code, choose a new `SWEEP_NAME`. Avoid running the same sweep twice at the same time.
+These directories do not import older runs or original model checkpoints.
+Manifests identify data, relevant configs, seeds, source/dependency fingerprints,
+and device. Status files record duration, completion/failure, and artifact hashes.
+Complete compatible stages are reused. Partial runs are excluded from evaluation;
+changed completed artifacts are rejected. Failed stages need inspection and a
+fresh root to retry; there is no optimizer-state resume.
+
+If you change the shared root, change it consistently for the baseline, parameter,
+and comparison notebooks. Generation uses the actual matched tables captured
+before toolkit cleanup drops keys. Reports save split IDs, predictions, detailed
+CSVs, settings/source fingerprints, uncertainty, and plots.
+
+Seeds control stochastic operations using them; some toolkit internal splits and
+random states are fixed. Reusing a cache does not change subsequent per-relation
+training draws. Cross-hardware determinism is not guaranteed.
+
+## Validation and reference files
+
+No real-cohort preparation, model training, synthetic generation, or notebook execution is performed automatically for this
+handoff. The new workflow is ready for your first run; full fresh generator
+execution is still unvalidated. Inspect the baseline's actual results before
+launching a broad sweep. Development checks and decisions are in [PROGRESS.md](PROGRESS.md).
+
+Targeted checks from the repository root:
+
+```bash
+.venv/bin/python -m pytest -q implementations/tabular_data/multi_table/tests/
+```
+
+[guidance_strength.ipynb](guidance_strength.ipynb) remains a historical notebook.
+It is outside the new run order. Original preprocessing/training/synthesis files
+remain reference implementations.
 
 ## Generation and clustering settings
 
@@ -158,29 +302,6 @@ These settings apply to the diffusion model, classifier, or both, as shown by th
 | **Diffusion timesteps** (`diffusion_config.num_timesteps`) | The number of noise levels used by the diffusion process and the steps used to generate data. More timesteps make generation slower and may improve quality, but improvement is not guaranteed. |
 
 Changing a training setting requires retraining the affected model. If the diffusion timesteps change, retrain both the diffusion model and classifier so their noise schedules remain compatible.
-
-## Read the historical all-table comparison
-
-| Score | What to look for |
-| --- | --- |
-| Foreign-key validity and primary-key uniqueness | Both should be **1.0**: links resolve and primary keys are unique. |
-| Cardinality KS distance | Lower is better: the number of children per parent resembles the real data, including parents with no children. |
-| Cross-table correlation RMSE | Lower is better: relationships between parent and child attributes resemble the real data. |
-| Numerical KS and categorical total variation distances | Lower is better: individual column distributions resemble the real data. |
-| Account-date/loan-date correlation error | Lower is better: this specific relationship is closer to the real-data relationship. |
-
-The comparison also counts undefined correlation pairs. Missing scores are not evidence of good quality.
-
-Use the fresh **guidance = 1** trial as the controlled baseline. The notebook explicitly puts models into evaluation mode, so older saved generations may differ even at the same guidance value.
-
-These scores measure similarity to the training data. They do not establish held-out task performance or privacy protection, and a single seed does not establish a reliable improvement.
-
-## Tuning order (supported by the new notebook; new training not yet run)
-
-1. Compare guidance strengths using the existing models.
-2. Explore cluster count, parent-feature weighting, and clustering method with fresh checkpoints.
-3. Explore learning rates, training steps, network size, dropout, and diffusion timesteps.
-4. Repeat promising configurations across seeds and check quality tradeoffs before selecting one.
 
 ## Additional controls in the tuning notebook
 
