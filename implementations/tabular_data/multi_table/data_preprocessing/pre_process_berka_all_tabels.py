@@ -431,6 +431,7 @@ def preprocess_berka_all_tables(
     trans_sample_size: int | None = None,
     seed: int = 42,
     save_artifacts: bool = True,
+    raw_tables: dict[str, pd.DataFrame] | None = None,
 ) -> dict[str, Any]:
     """Preprocess all eight Berka tables and write ClavaDDPM inputs.
 
@@ -456,6 +457,9 @@ def preprocess_berka_all_tables(
     save_artifacts:
         If True, also write ``preprocess_meta.json`` and
         ``label_encoders.pkl``.
+    raw_tables:
+        Optional normalized raw tables, for example an account-linked cohort.
+        Reuses the same transformations without intermediate CSV copies.
     """
     input_dir = Path(input_dir)
     output_dir = Path(output_dir) if output_dir is not None else _DEFAULT_OUTPUT_DIR
@@ -466,9 +470,13 @@ def preprocess_berka_all_tables(
     n_rows: dict[str, int] = {}
 
     for table in TABLE_NAMES:
-        path = find_table_path(input_dir, table)
-        print(f"Loading {table} from {path} ...")
-        raw = load_raw_table(path, table, sep)
+        if raw_tables is None:
+            path = find_table_path(input_dir, table)
+            print(f"Loading {table} from {path} ...")
+            raw = load_raw_table(path, table, sep)
+        else:
+            print(f"Preprocessing supplied raw {table} ...")
+            raw = raw_tables[table].copy()
         print(f"  {len(raw):,} rows, columns={list(raw.columns)}")
         if table == "trans" and trans_sample_size is not None:
             raw = sample_dataframe(raw, trans_sample_size, seed)
