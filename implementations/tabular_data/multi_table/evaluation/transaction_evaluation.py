@@ -19,11 +19,13 @@ import pandas as pd
 import yaml
 from sklearn.metrics import average_precision_score, precision_recall_curve, roc_auc_score
 
+from implementations.tabular_data.multi_table.evaluation.multi_table_quality import multi_table_quality
 from implementations.tabular_data.multi_table.evaluation.overdraft_transfer_evaluator import (
     DEFAULT_RANDOM_FOREST_PARAMS,
     OverdraftTransferEvaluator,
 )
 from implementations.tabular_data.multi_table.evaluation.transaction_quality import transaction_quality
+from implementations.tabular_data.multi_table.experiments.tuning import data_signature
 
 
 def standardized_ap(labels, probabilities, prevalence: float) -> float:
@@ -99,10 +101,18 @@ def evaluate_saved_runs(
     run_dirs = [Path(p).resolve() for p in run_dirs]
     if not run_dirs or len({p.name for p in run_dirs}) != len(run_dirs) or any(p.name == "real_test" for p in run_dirs):
         raise ValueError("Provide at least one run; directory names must be unique.")
-    files = [data_dir / f"{table}.csv" for table in ("account", "trans")]
-    files += [data_dir / "preprocess_meta.json"]
+    dataset_meta = json.loads((data_dir / "dataset_meta.json").read_text())
+    files = [data_dir / f"{table}{suffix}" for table in dataset_meta["tables"] for suffix in (".csv", "_domain.json")]
+    files += [data_dir / "preprocess_meta.json", data_dir / "dataset_meta.json"]
+    files += [p for p in (data_dir / "account_sample_manifest.json", data_dir / "selected_accounts.csv") if p.exists()]
+    reference_signature = data_signature(data_dir)
     files += list(Path(__file__).parent.glob("*.py"))
     for directory in run_dirs:
+        trial_manifest = directory / "manifest.json"
+        if trial_manifest.is_file():
+            recorded = json.loads(trial_manifest.read_text()).get("context", {}).get("data")
+            if recorded is not None and recorded != reference_signature:
+                raise ValueError(f"Trial {directory.name} used a different reference dataset. Select matching DATA_DIR and runs.")
         files += [directory / "synthetic_final_with_keys.pkl"]
         files += [p for p in (directory / "config.yaml", directory / "manifest.json") if p.exists()]
     manifest = {
@@ -116,7 +126,9 @@ def evaluate_saved_runs(
             for p in ("numpy", "pandas", "scipy", "scikit-learn", "midst-toolkit", "syntheval")
         },
         "task": "current balance < 0; real-trained detector to synthetic",
-        "fidelity_reference": "full generator training reference; not an outer holdout",
+        "fidelity_reference": "all declared tables from generator input; not an outer holdout",
+        "evaluation_groups": ["full_multi_table_quality", "transaction_and_overdraft_transfer"],
+        "data_signature": reference_signature,
         "uncertainty": "account bootstrap conditional on one fitted detector and one saved generation",
     }
     identifier = hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()[:16]
@@ -144,7 +156,9 @@ def evaluate_saved_runs(
 
 
 def _evaluate(data_dir, run_dirs, report_dir, *, repetitions, seed, threshold, forest_params):
-    real = {table: pd.read_csv(data_dir / f"{table}.csv") for table in ("account", "trans")}
+    dataset_meta = json.loads((data_dir / "dataset_meta.json").read_text())
+    real = {table: pd.read_csv(data_dir / f"{table}.csv") for table in dataset_meta["tables"]}
+    domains = {table: json.loads((data_dir / f"{table}_domain.json").read_text()) for table in real}
     metadata = json.loads((data_dir / "preprocess_meta.json").read_text())
     evaluator = OverdraftTransferEvaluator(
         real["trans"], random_state=seed, threshold=threshold, random_forest_params=forest_params,
@@ -204,7 +218,12 @@ def _evaluate(data_dir, run_dirs, report_dir, *, repetitions, seed, threshold, f
             scores,
         )
         quality, details = transaction_quality(real, synthetic, metadata.get("date_epochs_yymmdd"))
-        metrics.update(quality)
+        global_quality, global_details = multi_table_quality(
+            real, synthetic, dataset_meta, domains,
+            sample_scale=config.get("sampling_config", {}).get("sample_scale", 1.0),
+        )
+        metrics.update({**quality, **global_quality})
+        details.update(global_details)
         metrics["ap_gap_from_real_test"] = (
             metrics["average_precision"] - evaluator.real_test_metrics["average_precision"]
         )
@@ -212,7 +231,7 @@ def _evaluate(data_dir, run_dirs, report_dir, *, repetitions, seed, threshold, f
             metrics["overdraft_prevalence"] - evaluator.real_data.overdraft.mean()
         )
         metrics["valid_structure"] = bool(
-            quality["transaction_fk_valid_rate"] == 1 and quality["transaction_pk_unique_rate"] == 1,
+            global_quality["all_min_fk_valid_rate"] == 1 and global_quality["all_min_pk_unique_rate"] == 1,
         )
         for name, detail in details.items():
             if name == "overdraft_by_category":
@@ -273,3 +292,11 @@ def plot_comparison(comparison, curves, report_dir):
     ax.figure.tight_layout()
     ax.figure.savefig(report_dir / "quality_comparison.png", dpi=150)
     plt.close(ax.figure)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5), constrained_layout=True)
+    generated = comparison.drop(index="real_test")
+    generated[["all_table_numerical_ks", "all_table_categorical_tvd"]].plot.bar(ax=axes[0], rot=15)
+    generated[["all_cardinality_ks", "all_relationship_correlation_rmse", "multi_parent_correlation_rmse"]].plot.bar(ax=axes[1], rot=15)
+    axes[0].set(title="All-table distributions (equal table weighting)", ylabel="Distance; lower is closer")
+    axes[1].set(title="All relationships and multi-parent matching", ylabel="Distance; lower is closer")
+    fig.savefig(report_dir / "multi_table_quality.png", dpi=150)
+    plt.close(fig)

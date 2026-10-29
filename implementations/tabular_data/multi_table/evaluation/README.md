@@ -1,4 +1,4 @@
-# Overdraft transfer evaluation
+# Multi-table quality and overdraft transfer evaluation
 
 [`overdraft_transfer_evaluator.py`](overdraft_transfer_evaluator.py) trains a random
 forest on real transactions, then evaluates the same detector on synthetic
@@ -66,26 +66,35 @@ performs on synthetic data; they are not a complete measure of synthetic data qu
 
 ## Reusable transaction-focused report
 
-Open [the evaluation notebook](../experiments/transaction_overdraft_evaluation.ipynb)
-for the complete saved-run analysis. It uses this same detector once for all runs.
-From the repository root:
+If starting with no experiments, first run
+[prepare_account_sample.ipynb](../experiments/prepare_account_sample.ipynb) to
+prepare the selected account cohort, then
+[00_baseline.ipynb](../experiments/00_baseline.ipynb) to train and generate a reference. Then open
+[the evaluation notebook](../experiments/transaction_overdraft_evaluation.ipynb).
+It discovers completed runs from the new workflow and uses one detector for all
+of them; empty discovery prints the next action instead of assuming results.
+From the repository root, after generation:
 
 ```python
 from pathlib import Path
 from implementations.tabular_data.multi_table.evaluation.transaction_evaluation import evaluate_saved_runs
-
-root = Path("implementations/tabular_data/multi_table")
-runs = [root / "results/experiments/guidance_strength_first_pass" / f"guidance_{s}_seed42"
-        for s in [0, 0.5, 1, 2, 4]]
-comparison, report_dir = evaluate_saved_runs(
-    root / "data/berka", runs, root / "results/experiments/transaction_overdraft",
-    bootstrap_repetitions=200,
+from implementations.tabular_data.multi_table.experiments.tuning import (
+    DEFAULT_EXPERIMENT_ROOT, DEFAULT_REPORT_ROOT, completed_runs,
 )
+from implementations.tabular_data.multi_table.experiments.dataset_settings import DATA_DIR
+
+runs = completed_runs(DATA_DIR, DEFAULT_EXPERIMENT_ROOT)
+if runs:
+    comparison, report_dir = evaluate_saved_runs(
+        DATA_DIR, runs, DEFAULT_REPORT_ROOT, bootstrap_repetitions=200,
+    )
+else:
+    print("Create your first reference run with experiments/00_baseline.ipynb.")
 ```
 
 Each run must contain trusted `synthetic_final_with_keys.pkl` with `account` and
-`trans` DataFrames. The reference requires the matching CSVs and
-`preprocess_meta.json` with the category codebooks and date epochs. Both real and
+`trans` DataFrames. The full-schema reference requires every CSV/domain declared in
+`dataset_meta.json`, plus `preprocess_meta.json` with the category codebooks and date epochs. Both real and
 synthetic `account_id` values are needed for grouped uncertainty and relationships.
 Invalid/missing target balances are rejected rather than silently relabeled.
 
@@ -109,11 +118,11 @@ column; there is no opaque combined score.
 - **Uncertainty:** 200 account-bootstrap draws by default, fixed detector. The
   report counts valid two-class replicates; fewer than 20 yield missing intervals.
   This is exploratory percentile uncertainty, not variation across generator seeds.
-- **Prevalence:** synthetic runs have more overdrafts than the full real reference.
-  Standardized AP reweights classes to the real holdout prevalence, but does not
+- **Prevalence:** report the actual real and synthetic event rates; differences
+  affect AP. Standardized AP reweights classes to the real holdout prevalence, but does not
   correct every difference in data difficulty. Do not rank by raw AP alone.
-- **Holdout:** accounts are separate for detector fitting/testing. Existing
-  generator checkpoints do not establish an independent relational outer test set.
+- **Holdout:** accounts are separate for detector fitting/testing. Internal
+  generator splits do not establish an independent relational outer test set.
 
 The default classification threshold remains 0.5 for comparability; it has not
 been chosen for a deployment precision/recall target. Any future threshold choice
@@ -126,3 +135,47 @@ constructor and `evaluate_synthetic`/`get_metrics` APIs remain available.
 
 Reference concepts: [scikit-learn precision–recall](https://scikit-learn.org/stable/auto_examples/model_selection/plot_precision_recall.html)
 and [grouped cross-validation](https://scikit-learn.org/stable/modules/cross_validation.html).
+
+
+## Full multi-table diagnostics — enabled in every report
+
+`multi_table_quality.py` extracts/reuses the earlier notebook metrics through
+shared distribution helpers and the toolkit's mixed-correlation implementation.
+Every report now contains **both** full-schema quality and transaction/overdraft
+quality. The latter uses the same fixed real-trained detector across runs; no
+loan classifier or synthetic-trained real-test utility model has been added.
+
+| Report file per trial | Contents |
+| --- | --- |
+| `all_table_scores.csv` | Row counts/scaled deviations, PK validity, per-table KS/TVD, missing/unknown rates, within-table association errors. |
+| `all_column_distributions.csv` | Individual column scores and support/invalid counts. |
+| `all_edge_scores.csv` | Every direct edge: FK validity, child-count KS including zeros, joined-row coverage, and parent/child association errors. |
+| `all_cross_table_correlations.csv` / `all_within_table_correlations.csv` | Pair-level diagnostics and undefined pairs. |
+| `multi_parent_scores.csv` / `multi_parent_correlations.csv` | Client/account attributes joined through `disp`; mixed associations and cross-parent joint categorical TVD. |
+| `excluded_features.csv` | Domain features excluded as identifiers (`trans.account`, `order.account_to`, and any internal IDs). |
+
+`multi_table_quality.png` accompanies the transaction/overdraft plots. Global
+numerical/categorical summaries average per-table means equally. Eligible missing
+column/edge scores propagate as missing; mixed-correlation RMSE uses defined pairs
+and reports undefined-pair counts alongside it. Table and edge breakdowns should
+be inspected rather than relying on the summaries alone. Empty/invalid joins do
+not become perfect zero-error relationships.
+
+The additional joint categorical TVD is needed because an association-strength
+statistic alone can miss a change in specific category combinations. These are
+attribute-based comparisons; numerical values of synthetic IDs are not compared
+with real identities. There is no combined task/fidelity winner score.
+
+## Selecting another reference dataset
+
+Edit `../experiments/dataset_settings.py` or override notebook `DATA_DIR` consistently.
+All references are cohort-specific. Reports fingerprint every table, domain,
+schema, preprocessing metadata, and available cohort manifest. A trial with a
+recorded input signature that differs from the selected reference is rejected
+before scoring. Historical trials without signatures can still be evaluated
+explicitly, but provenance cannot be independently established from their missing
+metadata. Current experiment discovery selects only complete matching inputs.
+
+Full account histories are retained by the preparation workflow; the selected
+500-account pilot is not the complete raw population. Use the actual event/account
+counts and uncertainty rather than assuming a fixed number of real test positives.
