@@ -7,7 +7,7 @@
         "district": null,
         "loan": "930705",
         "order": null,
-        "trans": "930116"
+        "trans": "930101"
     },
     "n_rows": {
         "account": 4500,
@@ -17,7 +17,7 @@
         "district": 77,
         "loan": 682,
         "order": 6471,
-        "trans": 20000
+        "trans": 100000
     },
     "tables": {
         "account": {
@@ -531,6 +531,6 @@
         }
     },
     "date_epoch": null,
-    "trans_sample_size": 20000,
+    "trans_sample_size": 100000,
     "seed": 42
 }

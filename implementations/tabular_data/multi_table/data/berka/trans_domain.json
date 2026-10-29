@@ -21,6 +21,6 @@
         "type": "discrete"
     },
     "account": {
-        "type": "continuous"
+        "type": "discrete"
     }
 }
