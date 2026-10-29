@@ -5809,6 +5809,8 @@ tabular-data = [
     { name = "gdown" },
     { name = "midst-toolkit" },
     { name = "pandas" },
+    { name = "scikit-learn" },
+    { name = "torch" },
 ]
 text-sft = [
     { name = "accelerate" },
@@ -5892,6 +5894,8 @@ tabular-data = [
     { name = "gdown", specifier = ">=6.1.0" },
     { name = "midst-toolkit", git = "https://github.com/VectorInstitute/midst-toolkit.git?rev=52e4500a03afc7f36d93abd7591413ff6393f27c" },
     { name = "pandas", specifier = ">=2.3.3" },
+    { name = "scikit-learn", specifier = ">=1.9.1" },
+    { name = "torch", specifier = ">=2.14.0" },
 ]
 text-sft = [
     { name = "accelerate" },
