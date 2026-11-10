@@ -38,7 +38,7 @@ from typing import Any
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-
+import numpy as np
 
 # Columns in the MIDST / ClavaDDPM single-table Berka export
 OUTPUT_COLUMNS = [
@@ -225,7 +225,17 @@ def sample_dataframe(df: pd.DataFrame, sample_size: int | None, seed: int) -> pd
     if sample_size >= len(df):
         print(f"sample-size {sample_size} >= nrows {len(df)}; using full table.")
         return df
-    return df.sample(n=sample_size, random_state=seed).reset_index(drop=True)
+    
+    sampled_df = pd.DataFrame()
+    rng = np.random.default_rng(seed=seed)
+    ratio = (df['account_id'].nunique())/len(df)
+    for acct_size in np.arange(int(ratio*sample_size), df['account_id'].nunique()-1, 10):
+        acct_ids = rng.choice(df['account_id'].unique(), size=acct_size, replace=False)
+        if len(df[df['account_id'].isin(acct_ids)]) >= sample_size:
+            sampled_df = df[df['account_id'].isin(acct_ids)].reset_index(drop=True)
+            break
+    return sampled_df
+    # return df.sample(n=sample_size, random_state=seed).reset_index(drop=True)
 
 
 def split_train_holdout(
