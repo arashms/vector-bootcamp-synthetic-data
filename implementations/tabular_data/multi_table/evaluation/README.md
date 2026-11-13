@@ -67,10 +67,10 @@ performs on synthetic data; they are not a complete measure of synthetic data qu
 ## Reusable transaction-focused report
 
 If starting with no experiments, first run
-[prepare_account_sample.ipynb](../experiments/prepare_account_sample.ipynb) to
+[00_prepare_account_sample.ipynb](../experiments/notebooks/00_prepare_account_sample.ipynb) to
 prepare the selected account cohort, then
-[00_baseline.ipynb](../experiments/00_baseline.ipynb) to train and generate a reference. Then open
-[the evaluation notebook](../experiments/transaction_overdraft_evaluation.ipynb).
+[01_baseline.ipynb](../experiments/notebooks/01_baseline.ipynb) to train and generate a reference. Then open
+[02_all_experiments.ipynb](../experiments/notebooks/02_all_experiments.ipynb).
 It discovers completed runs from the new workflow and uses one detector for all
 of them; empty discovery prints the next action instead of assuming results.
 From the repository root, after generation:
@@ -89,7 +89,7 @@ if runs:
         DATA_DIR, runs, DEFAULT_REPORT_ROOT, bootstrap_repetitions=200,
     )
 else:
-    print("Create your first reference run with experiments/00_baseline.ipynb.")
+    print("Create your first reference run with experiments/notebooks/01_baseline.ipynb.")
 ```
 
 Each run must contain trusted `synthetic_final_with_keys.pkl` with `account` and

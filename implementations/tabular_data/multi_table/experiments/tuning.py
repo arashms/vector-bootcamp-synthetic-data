@@ -8,11 +8,13 @@ under the experiment output directory; existing baseline checkpoints are read-on
 # ruff: noqa: PLC0415
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import importlib.metadata
 import json
 import pickle
 from copy import deepcopy
+from functools import partial
 from pathlib import Path
 from time import perf_counter
 from unittest.mock import patch
@@ -31,6 +33,7 @@ PRESETS = {
     "clustering_method": ("clustering_config.clustering_method", ["kmeans", "gmm", "kmeans_and_gmm"]),
     "diffusion_lr": ("diffusion_config.lr", [0.0002, 0.0006, 0.001]),
     "diffusion_steps": ("diffusion_config.iterations", [2500, 5000, 10000]),
+    "diffusion_steps_long": ("diffusion_config.iterations", [20000]),
     "diffusion_size": ("diffusion_config.d_layers", [[256, 512, 512, 256], [512, 1024, 1024, 1024, 1024, 512]]),
     "dropout": ("diffusion_config.dropout", [0.0, 0.1, 0.2]),
     "timesteps": ("diffusion_config.num_timesteps", [250, 500, 1000]),
@@ -41,6 +44,11 @@ PRESETS = {
     "classifier_batch": ("classifier_config.batch_size", [128, 256, 512]),
     "classifier_time_embedding": ("classifier_config.dim_t", [64, 128, 256]),
 }
+DATE_REPRESENTATIONS = ("absolute", "relative_to_account", "fraction_of_window")
+# Child date columns stored as days since their account opened when relative.
+RELATIVE_DATE_COLUMNS = {"trans": "trans_date", "loan": "loan_date", "card": "issued"}
+# Training-only account columns, derived from real data and dropped after sampling.
+ACCOUNT_FEATURES = ("none", "ever_overdrawn")
 
 
 def digest(value):
@@ -84,9 +92,17 @@ def base_config(*, fresh_training=True):
     config.pop("random_seed", None)
     config["training_seed"] = 42
     config["sampling_seed"] = 42
+    # Rows are sampled independently, so batch size only changes speed and RNG order.
+    config["sampling_config"]["batch_size"] = 8192
+    # Adopted 2026-11-12 (PROGRESS.md); legacy checkpoints used absolute dates.
+    config["date_representation"] = "fraction_of_window" if fresh_training else "absolute"
     config["classifier_config"].setdefault("data_split_ratios", [0.7, 0.2, 0.1])
     if fresh_training:
         config["diffusion_config"]["data_split_ratios"] = [0.7, 0.2, 0.1]
+        # Adopted 2026-11-12 (PROGRESS.md step 6): 10000 beat 5000 in 3/3 seeds.
+        config["diffusion_config"]["iterations"] = 10000
+        # Adopted 2026-11-12 (PROGRESS.md step 8): 512 beat 256 on ROC-AUC/AP, 3/3 seeds.
+        config["diffusion_config"]["batch_size"] = 512
     return validate_config(config, fresh_training=fresh_training)
 
 
@@ -102,6 +118,12 @@ def validate_config(config, *, fresh_training=True):  # noqa: PLR0912
     )
 
     result = deepcopy(config)
+    result.setdefault("date_representation", "absolute")
+    if result["date_representation"] not in DATE_REPRESENTATIONS:
+        raise ValueError(f"date_representation must be one of {DATE_REPRESENTATIONS}.")
+    result.setdefault("account_feature", "none")
+    if result["account_feature"] not in ACCOUNT_FEATURES:
+        raise ValueError(f"account_feature must be one of {ACCOUNT_FEATURES}.")
     classes = {
         "clustering_config": ClavaDDPMClusteringConfig,
         "diffusion_config": ClavaDDPMDiffusionConfig,
@@ -109,8 +131,8 @@ def validate_config(config, *, fresh_training=True):  # noqa: PLR0912
         "sampling_config": ClavaDDPMSamplingConfig,
         "matching_config": ClavaDDPMMatchingConfig,
     }
-    if set(result) != {*classes, "training_seed", "sampling_seed"}:
-        raise ValueError("Expected model, clustering, sampling, matching configs and two seeds only.")
+    if set(result) != {*classes, "training_seed", "sampling_seed", "date_representation", "account_feature"}:
+        raise ValueError("Expected model, clustering, sampling, matching configs, two seeds and dates only.")
     for section, cls in classes.items():
         values = result[section]
         sample_scale = values.pop("sample_scale", 1.0) if section == "sampling_config" else None
@@ -180,7 +202,16 @@ def make_trials(
 
 def stage_ids(config, context):
     """Identify each stage by exactly the upstream settings it depends on."""
-    cluster = digest({"context": context, "clustering": config["clustering_config"], "seed": config["training_seed"]})
+    cluster = digest(
+        {
+            "context": context,
+            "clustering": config["clustering_config"],
+            "seed": config["training_seed"],
+            "dates": config.get("date_representation", "absolute"),
+            # Omitted when unused so earlier stage IDs stay valid.
+            **({"account_feature": f} if (f := config.get("account_feature", "none")) != "none" else {}),
+        },
+    )
     diffusion = digest({"cluster": cluster, "diffusion": config["diffusion_config"]})
     model = digest({"diffusion": diffusion, "classifier": config["classifier_config"]})
     sample = digest(
@@ -218,6 +249,14 @@ def _save_json(path, value):
 def _stage(directory, manifest, action):
     """Reuse completed, verified artifacts; never mistake partial work for success."""
     directory = Path(directory)
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    # Concurrent workers wait here, then reuse the stage another worker completed.
+    with (directory.parent / f".{directory.name}.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _locked_stage(directory, manifest, action)
+
+
+def _locked_stage(directory, manifest, action):
     status_path = directory / "status.json"
     if directory.exists():
         if not status_path.exists():
@@ -258,14 +297,17 @@ def _load(path):
         return pickle.load(stream)
 
 
-def completed_runs(data_dir, output_root, *, configs=None):
+def completed_runs(data_dir, output_root, *, configs=None, current_runner_only=True):
     """Discover completed samples for this dataset, optionally exact trial configs.
 
     Partial stages and other datasets are excluded. A claimed complete run with
     changed or missing artifacts fails explicitly. Discovery does not sample or
-    train models, and includes compatible results from earlier runner versions.
+    train models. By default, runs made by other versions of this runner (for
+    example before the multi-parent matching fix) are excluded so identical configs
+    from different pipelines are never mixed.
     """
     signature = data_signature(data_dir)
+    runner = file_hash(__file__)
     paths = []
     for status_path in sorted((Path(output_root) / "samples").glob("*/status.json")):
         status = json.loads(status_path.read_text())
@@ -274,6 +316,8 @@ def completed_runs(data_dir, output_root, *, configs=None):
         directory = status_path.parent
         manifest = json.loads((directory / "manifest.json").read_text())
         if manifest.get("context", {}).get("data") != signature:
+            continue
+        if current_runner_only and manifest["context"].get("backend", {}).get("runner") != runner:
             continue
         if configs is not None and manifest.get("config") not in configs:
             continue
@@ -291,6 +335,163 @@ def completed_runs(data_dir, output_root, *, configs=None):
 def _dump(path, value):
     with path.open("wb") as stream:
         pickle.dump(value, stream)
+
+
+def match_multi_parent(child, parents, synthetic_tables, *_, no_matching=False, report, **__):
+    """Replace toolkit ``handle_multi_parent`` so matching never detaches grandchildren.
+
+    The toolkit keeps whichever child version is smaller, so grandchildren generated
+    from the other version (e.g. cards from client-side dispositions) can point to
+    missing or different rows, and unmatched parents silently lose every child. This
+    keeps the version grandchildren were generated from and gives each generated
+    other-parent row ("slot") at most one match: first one slot per parent, then the
+    remaining slots. Rows left without a slot are dropped; ``_enforce_keys`` then
+    removes their dependants.
+    """
+    import numpy as np
+    from midst_toolkit.models.clavaddpm.train import get_df_without_id
+    from scipy.optimize import linear_sum_assignment
+    from scipy.spatial.distance import cdist
+
+    if no_matching:
+        raise ValueError("no_matching is not supported by the parent-covering matcher.")
+    # The toolkit looks up a parent's synthetic rows by the first key with that child.
+    primary = next(p for p, c in synthetic_tables if c == child and p in parents)
+    final = synthetic_tables[(primary, child)]["df"].copy()
+    features = get_df_without_id(final).columns
+    summary = {"kept_version": primary, "generated_rows": len(final)}
+    for parent in [p for p in parents if p != primary]:
+        slots = synthetic_tables[(parent, child)]["df"]
+        distance = cdist(final[features].to_numpy(dtype=float), slots[features].to_numpy(dtype=float))
+        owners = slots[f"{parent}_id"].to_numpy()
+        order = np.argsort(owners, kind="stable")
+        starts = np.unique(owners[order], return_index=True)[1]
+        ends = np.append(starts[1:], len(order))
+        assigned = np.full(len(final), -1)
+        for row, owner in zip(*linear_sum_assignment(np.minimum.reduceat(distance[:, order], starts, axis=1))):
+            candidates = order[starts[owner]:ends[owner]]
+            assigned[row] = candidates[distance[row, candidates].argmin()]
+        free_rows = np.flatnonzero(assigned < 0)
+        free_slots = np.setdiff1d(np.arange(len(slots)), assigned)
+        if free_rows.size and free_slots.size:
+            picked_rows, picked_slots = linear_sum_assignment(distance[np.ix_(free_rows, free_slots)])
+            assigned[free_rows[picked_rows]] = free_slots[picked_slots]
+        final = final[assigned >= 0].copy()
+        final[f"{parent}_id"] = owners[assigned[assigned >= 0]]
+    summary["kept_rows"] = len(final)
+    report[child] = summary
+    return final
+
+
+def date_shifts(data_dir):
+    """Days from the account date epoch to each child table's epoch."""
+    meta = json.loads((Path(data_dir) / "preprocess_meta.json").read_text())["date_epochs_yymmdd"]
+    epochs = {table: pd.to_datetime(meta[table], format="%y%m%d") for table in ["account", *RELATIVE_DATE_COLUMNS]}
+    return {table: (epochs[table] - epochs["account"]).days for table in RELATIVE_DATE_COLUMNS}
+
+
+def _account_dates(frames, table):
+    """Return each row's account opening date; cards reach it through disp."""
+    opened = frames["account"].set_index("account_id")["account_date"]
+    if table == "card":
+        account = frames[table]["disp_id"].map(frames["disp"].set_index("disp_id")["account_id"])
+    else:
+        account = frames[table]["account_id"]
+    dates = account.map(opened)
+    if dates.isna().any():
+        raise ValueError(f"{table} rows without a resolvable account.")
+    return dates.to_numpy()
+
+
+def data_end(data_dir, shifts):
+    """Return the last real child date, in account-epoch days (the observation end)."""
+    return max(
+        (pd.read_csv(Path(data_dir) / f"{table}.csv")[column] + shifts[table]).max()
+        for table, column in RELATIVE_DATE_COLUMNS.items()
+    )
+
+
+def encode_relative_dates(frames, shifts, end=None):
+    """Return copies with child dates as days since account opening (real data).
+
+    With ``end``, days are divided by the account's observable window (opening to
+    ``end``), so values lie in [0, 1].
+    """
+    result = dict(frames)
+    for table, column in RELATIVE_DATE_COLUMNS.items():
+        frame = frames[table].copy()
+        opened = _account_dates(frames, table)
+        frame[column] = frame[column] + shifts[table] - opened
+        if (frame[column] < 0).any():
+            raise ValueError(f"Real {table}.{column} precedes account opening.")
+        if end is not None:
+            if (end - opened <= 0).any() or (frame[column] > end - opened).any():
+                raise ValueError(f"Real {table}.{column} lies outside the observable window.")
+            frame[column] = frame[column] / (end - opened)
+        result[table] = frame
+    return result
+
+
+def decode_relative_dates(frames, shifts, end=None):
+    """Convert synthetic child dates back in place; clip to bounds; count clips."""
+    clipped = {}
+    for table, column in RELATIVE_DATE_COLUMNS.items():
+        frame = frames[table].copy()
+        offset = pd.to_numeric(frame[column])
+        opened = pd.to_numeric(pd.Series(_account_dates(frames, table), index=frame.index))
+        upper = None if end is None else 1.0
+        clipped[table] = int((offset < 0).sum() + (0 if upper is None else (offset > upper).sum()))
+        offset = offset.clip(lower=0, upper=upper)
+        if end is not None:
+            offset = offset * (end - opened).clip(lower=0)
+        frame[column] = offset + opened - shifts[table]
+        frames[table] = frame
+    return clipped
+
+
+def add_account_feature(frames, feature):
+    """Return copies with the training-only account column (real data)."""
+    result = dict(frames)
+    account = frames["account"].copy()
+    if feature == "ever_overdrawn":
+        overdrawn = frames["trans"].loc[frames["trans"]["balance"] < 0, "account_id"]
+        account[feature] = account["account_id"].isin(overdrawn).astype(int)
+    result["account"] = account
+    return result
+
+
+def feature_data_dir(data_dir, folder, feature):
+    """Write table metadata with the extra account column; return its directory.
+
+    ``load_tables`` reads domains from disk even when given frames.
+    """
+    target = Path(folder) / "inputs"
+    target.mkdir(parents=True, exist_ok=True)
+    for path in [Path(data_dir) / "dataset_meta.json", *Path(data_dir).glob("*_domain.json")]:
+        (target / path.name).write_text(path.read_text())
+    domain = json.loads((target / "account_domain.json").read_text())
+    domain[feature] = {"type": "discrete"}
+    _save_json(target / "account_domain.json", domain)
+    return target
+
+
+def _enforce_keys(final, relations, kept_versions):
+    """Drop rows the matcher left without a child or parent; return counts per table.
+
+    The kept-version parent (e.g. a client) of a dropped child row has no other child,
+    so it is dropped too; then any row whose foreign key no longer resolves is dropped.
+    """
+    dropped = {}
+    for child, parent in kept_versions.items():
+        keep = final[parent][f"{parent}_id"].isin(final[child][f"{parent}_id"])
+        dropped[parent] = int((~keep).sum())
+        final[parent] = final[parent][keep]
+    for parent, child in relations:
+        if parent is not None:
+            keep = final[child][f"{parent}_id"].isin(final[parent][f"{parent}_id"])
+            dropped[child] = dropped.get(child, 0) + int((~keep).sum())
+            final[child] = final[child][keep]
+    return dropped
 
 
 def run_trials(trials, data_dir, output_root, *, legacy_results=None, device="cuda"):
@@ -314,6 +515,10 @@ def run_trials(trials, data_dir, output_root, *, legacy_results=None, device="cu
     _, relations, _ = load_tables(data_dir)
     legacy = Path(legacy_results).resolve() if legacy_results else None
     if legacy:
+        if any(c["date_representation"] != "absolute" for c in trials):
+            raise ValueError("Legacy checkpoints were trained on absolute dates.")
+        if any(c["account_feature"] != "none" for c in trials):
+            raise ValueError("Legacy checkpoints were trained without account features.")
         original = base_config(fresh_training=False)
         for config in trials:
             if any(
@@ -364,13 +569,32 @@ def _run_trial(config, *, context, data_dir, output_root, relations, legacy, dev
     from midst_toolkit.models.clavaddpm.train import child_training, get_df_without_id, train_classifier
 
     ids = stage_ids(config, context)
+    relative = config["date_representation"] != "absolute"
+    shifts = date_shifts(data_dir) if relative else None
+    end = data_end(data_dir, shifts) if config["date_representation"] == "fraction_of_window" else None
     common = {"context": context, "training_seed": config["training_seed"]}
+    if relative:
+        common["date_representation"] = config["date_representation"]
+    feature = config["account_feature"]
+    if feature != "none":
+        common["account_feature"] = feature
     cluster_dir = legacy or output_root / "clustering" / ids["cluster"]
     if not legacy:
 
         def cluster_action(folder):
             set_all_random_seeds(config["training_seed"])
-            tables, _, _ = load_tables(data_dir)
+            if relative or feature != "none":
+                meta = json.loads((data_dir / "dataset_meta.json").read_text())
+                raw = {t: pd.read_csv(data_dir / f"{t}.csv") for t in meta["tables"]}
+                source = data_dir
+                if feature != "none":
+                    raw = add_account_feature(raw, feature)
+                    source = feature_data_dir(data_dir, folder, feature)
+                if relative:
+                    raw = encode_relative_dates(raw, shifts, end)
+                tables, _, _ = load_tables(source, train_data=raw)
+            else:
+                tables, _, _ = load_tables(data_dir)
             clava_clustering(tables, relations, folder, ClavaDDPMClusteringConfig(**config["clustering_config"]))
             return [folder / "cluster_ckpt.pkl"]
 
@@ -452,11 +676,20 @@ def _run_trial(config, *, context, data_dir, output_root, relations, legacy, dev
                 artifact.classifier.eval()
         set_all_random_seeds(config["sampling_seed"])
         captured = {}
+        matching_report = {}
         original_match = synthesizer.clava_synthesizing_matching_process
 
         def capture_match(*args, **kwargs):
             final = original_match(*args, **kwargs)
+            kept = {child: summary["kept_version"] for child, summary in matching_report.items()}
+            matching_report["dropped_rows"] = _enforce_keys(final, relations, kept)
+            if relative:
+                # Decode after matching: cards only reach an account through disp.
+                matching_report["clipped_relative_dates"] = decode_relative_dates(final, shifts, end)
             captured.update({table: frame.copy(deep=True) for table, frame in final.items()})
+            if feature != "none":
+                values = pd.to_numeric(captured["account"].pop(feature))
+                matching_report["account_feature_rate"] = {feature: float(values.mean())}
             return final
 
         general = GeneralConfig(
@@ -469,7 +702,10 @@ def _run_trial(config, *, context, data_dir, output_root, relations, legacy, dev
         sampling = {k: v for k, v in config["sampling_config"].items() if k != "sample_scale"}
         # Capture the ACTUAL matched tables before toolkit cleanup drops keys.
         # This is scoped to one call and restored even on failure; run sequentially.
-        with patch.object(synthesizer, "clava_synthesizing_matching_process", capture_match):
+        with (
+            patch.object(synthesizer, "clava_synthesizing_matching_process", capture_match),
+            patch.object(synthesizer, "handle_multi_parent", partial(match_multi_parent, report=matching_report)),
+        ):
             synthesizer.clava_synthesizing(
                 tables,
                 relations,
@@ -485,7 +721,8 @@ def _run_trial(config, *, context, data_dir, output_root, relations, legacy, dev
             raise ValueError("Sampling did not return every table.")
         _dump(folder / "synthetic_final_with_keys.pkl", captured)
         (folder / "config.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
-        return [folder / "synthetic_final_with_keys.pkl", folder / "config.yaml"]
+        _save_json(folder / "matching_report.json", matching_report)
+        return [folder / "synthetic_final_with_keys.pkl", folder / "config.yaml", folder / "matching_report.json"]
 
     _stage(run_dir, {"context": context, "config": config, "model_id": ids["model"]}, sample_action)
     return run_dir
