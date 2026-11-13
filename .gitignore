@@ -26,6 +26,11 @@ wheels/
 .env
 .terraform
 
+# Logs
+logs/
+*.log
+nohup.out
+
 # QA text generation — generated artifacts (sample source excerpts in documents/*.txt are kept)
 implementations/qa_text_generation/data/paragraphs.jsonl
 implementations/qa_text_generation/data/results/*
@@ -66,6 +71,10 @@ runs/detect/
 # Tabular data gitignore
 implementations/tabular_data/**.csv
 implementations/tabular_data/**/preprocess_meta.json
+# Generated account cohorts (rebuild with experiments/prepare_account_sample.ipynb)
+implementations/tabular_data/multi_table/data/berka_accounts_*/
+# Raw Berka archive: distributed as a GitHub release asset, not in git
+implementations/tabular_data/multi_table/data/berka.tar.gz
 
 # ignore result artifacts, keep directory structure via .gitkeep
 implementations/tabular_data/single_table/results/**
