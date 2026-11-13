@@ -5843,7 +5843,7 @@ requires-dist = [
     { name = "rich", specifier = ">=14.2.0" },
     { name = "setuptools", specifier = "==83.0.0" },
     { name = "soupsieve", specifier = "==2.9.0" },
-    { name = "tornado", specifier = "==6.5.8" },
+    { name = "tornado", specifier = "==6.5.9" },
     { name = "urllib3", specifier = ">=2.8.0" },
     { name = "virtualenv", specifier = "==21.7.13" },
 ]
