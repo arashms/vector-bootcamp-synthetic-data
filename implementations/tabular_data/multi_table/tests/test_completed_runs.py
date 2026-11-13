@@ -54,13 +54,18 @@ def test_completed_run_discovery_filters_data_configs_and_checks_artifacts(tmp_p
         return paths
 
     config = {"parameter": 1}
-    manifest = {"context": {"data": tuning.data_signature(data_dir)}, "config": config}
+    context = {"data": tuning.data_signature(data_dir), "backend": {"runner": tuning.file_hash(tuning.__file__)}}
+    manifest = {"context": context, "config": config}
     complete = tuning._stage(root / "samples" / "complete", manifest, save)
-    tuning._stage(root / "samples" / "other-data", {**manifest, "context": {"data": {}}}, save)
+    tuning._stage(root / "samples" / "other-data", {**manifest, "context": {**context, "data": {}}}, save)
+    older = tuning._stage(
+        root / "samples" / "older-runner", {**manifest, "context": {**context, "backend": {"runner": "old"}}}, save,
+    )
     partial = root / "samples" / "partial"
     partial.mkdir()
     (partial / "status.json").write_text('{"status": "failed"}')
     assert tuning.completed_runs(data_dir, root) == [complete]
+    assert tuning.completed_runs(data_dir, root, current_runner_only=False) == [complete, older]
     assert tuning.completed_runs(data_dir, root, configs=[config]) == [complete]
     assert tuning.completed_runs(data_dir, root, configs=[{"parameter": 2}]) == []
     assert tuning.completed_runs(data_dir, root, configs=[]) == []

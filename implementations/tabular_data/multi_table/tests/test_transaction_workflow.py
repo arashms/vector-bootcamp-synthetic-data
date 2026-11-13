@@ -218,6 +218,40 @@ def test_stage_reuses_complete_rejects_changed_and_failed(tmp_path):
         tuning._stage(tmp_path / "failed", {}, write)
 
 
+@pytest.mark.parametrize(("clients", "slot_owners"), [(5, [0, 0, 1, 2]), (2, [0, 1, 2, 2])])
+def test_multi_parent_matching_keeps_cards_attached_and_covers_parents(clients, slot_owners):
+    """Kept dispositions are the ones cards came from; no slot is used twice."""
+    synthetic = {
+        ("district", "client"): {"df": pd.DataFrame({"client_id": range(clients)})},
+        ("district", "account"): {"df": pd.DataFrame({"account_id": range(3)})},
+        ("client", "disp"): {"df": pd.DataFrame(
+            {"disp_id": range(clients), "client_id": range(clients), "disp_type": [0.0, 1.0, 0.0, 0.0, 1.0][:clients]},
+        )},
+        ("account", "disp"): {"df": pd.DataFrame(
+            {"disp_id": range(4), "account_id": slot_owners, "disp_type": [0.0, 1.0, 0.0, 1.0]},
+        )},
+        ("disp", "card"): {"df": pd.DataFrame({"card_id": range(clients), "disp_id": range(clients)})},
+    }
+    report = {}
+    disp = tuning.match_multi_parent("disp", ["client", "account"], synthetic, 1, no_matching=False, report=report)
+    final = {"client": synthetic[("district", "client")]["df"], "account": synthetic[("district", "account")]["df"],
+             "district": pd.DataFrame({"district_id": [0]}), "disp": disp, "card": synthetic[("disp", "card")]["df"]}
+    final["client"] = final["client"].assign(district_id=0)
+    final["account"] = final["account"].assign(district_id=0)
+    relations = [(None, "district"), ("district", "client"), ("district", "account"), ("client", "disp"),
+                 ("account", "disp"), ("disp", "card")]
+    dropped = tuning._enforce_keys(final, relations, {"disp": report["disp"]["kept_version"]})
+
+    assert report["disp"]["kept_version"] == "client"
+    assert len(final["disp"]) == min(clients, len(slot_owners))
+    assert final["card"].disp_id.isin(final["disp"].disp_id).all()
+    assert final["client"].client_id.isin(final["disp"].client_id).all()
+    slots_left = pd.Series(slot_owners).value_counts().sub(final["disp"].account_id.value_counts(), fill_value=0)
+    assert slots_left.ge(0).all()
+    assert final["disp"].account_id.nunique() == min(clients, 3)
+    assert dropped["client"] == dropped["card"] == max(clients - len(slot_owners), 0)
+
+
 class DummyNetwork:
     """Picklable lightweight substitute used only to exercise orchestration."""
 
@@ -271,7 +305,7 @@ def test_runner_dispatch_reuse_and_actual_matched_keys(tmp_path, monkeypatch, ta
     monkeypatch.setattr(train, "train_classifier", classifier)
     monkeypatch.setattr(synthesizer, "clava_synthesizing", sample)
     monkeypatch.setattr(synthesizer, "clava_synthesizing_matching_process", match)
-    base = tuning.base_config()
+    base = {**tuning.base_config(), "date_representation": "absolute"}  # stub data has no dates
     trials = tuning.make_trials(base, "sampling_config.classifier_scale", [0, 1])
     trials += tuning.make_trials(base, "classifier_config.lr", [base["classifier_config"]["lr"] * 2])
     paths = tuning.run_trials(trials, data_dir, tmp_path / "outputs", device="cpu")
